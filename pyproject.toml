@@ -1,0 +1,21 @@
+[project]
+name = "fx-tool"
+version = "1.0.0"
+description = "A currency conversion tool an AI agent can call, backed by ECB rates."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.pyrefly]
+# Resolve imports against the project virtualenv, not the system interpreter.
+python-interpreter = ".venv/bin/python"
