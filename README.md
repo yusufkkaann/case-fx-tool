@@ -1,41 +1,40 @@
-# Case study — Junior Software Engineer at mangolab
+# fx-tool
 
-Two small tasks, **about two and a half hours in total.** Please do not spend
-your weekend on this. If you run out of time, stop and write down what you would
-have done next — that answer counts too.
+İki para birimi arasında, [Frankfurter](https://frankfurter.dev) (Avrupa Merkez
+Bankası referans kurları) üzerinden çevrim yapan küçük bir HTTP servisi. Bir AI
+agent tarafından "tool" olarak çağrılacak şekilde tasarlandı; bu yüzden yol
+gösteren ilke şu: **yanlış bir sayı, hiç sayı olmamasından beterdir.** Servis asla
+bir kur uydurmaz ve bir kuru ait olmadığı bir tarihe aitmiş gibi sunmaz.
 
-Use Claude Code, Cursor, Copilot — whatever you normally use. That is how we work
-every day, and we would rather see you use it well than watch you avoid it. The
-only thing we ask is that you know your own code.
+## Çalıştırma
 
-**Start by clicking "Use this template"** to create your own repository, then
-work there.
+```bash
+./run.sh        # servisi $PORT üzerinde başlatır (varsayılan 8080)
+```
 
----
+- `FX_UPSTREAM_BASE` — upstream taban URL'i (varsayılan `https://api.frankfurter.dev`)
+- `PORT` — dinlenecek port (varsayılan `8080`)
 
-## Part A — build (about 90 minutes)
+Python 3.11+ gerekir. Script ilk çalıştırmada kendi sanal ortamını (venv) kurar.
 
-A small HTTP service — Python + FastAPI preferred, TypeScript is fine — with one
-endpoint an AI agent could call as a tool:
+## Test
+
+```bash
+./test.sh       # testleri hiç ağ kullanmadan çalıştırır
+```
+
+Upstream süreç içinde taklit edilir; bu yüzden `FX_UPSTREAM_BASE` kapalı bir porta
+işaret etse bile testler geçer.
+
+## Uç nokta (endpoint)
 
 ```
 GET /tools/convert?amount=250&from=EUR&to=TRY&date=2026-08-28
 ```
 
-It answers using the public [Frankfurter API](https://frankfurter.dev) —
-European Central Bank rates, no API key, no signup.
+`date` opsiyoneldir; verilmezse en son yayınlanan kurlar kullanılır.
 
-### Three things are fixed, so that we can run every submission the same way
-
-| | |
-|---|---|
-| Upstream URL | from the `FX_UPSTREAM_BASE` environment variable, defaulting to `https://api.frankfurter.dev`. **Nothing may hardcode the real host** — we point this at a fake upstream when reviewing. |
-| Port | from the `PORT` environment variable, default `8080` |
-| Scripts | `./run.sh` starts the service, `./test.sh` runs the tests. Both are in this template, unimplemented. |
-
-### The response
-
-On success, 200 with:
+### Başarı — `200`
 
 ```json
 {
@@ -50,80 +49,68 @@ On success, 200 with:
 }
 ```
 
-`rate_date` is **the date the rate you used actually belongs to.** `asked_date`
-is what the caller asked for. They are not always the same, and that difference
-is the point of this task.
+- **`rate_date`** kurun gerçekte ait olduğu gündür (upstream cevabından okunur),
+  **`asked_date`** ise çağıranın sorduğu gündür.
+- ECB, sorulan tarih için bir şey yayınlamadıysa (hafta sonu/tatil), upstream en
+  yakın iş gününü döner. Bunu görünür kılarız: `rate_date`, `asked_date`'ten
+  farklı olur; böylece model, sayının hangi güne ait olduğunu müşteriye
+  söyleyebilir. Tarih sorulmadıysa `asked_date` `null` olur.
+- Tutarlar ve kurlar, ikili taban yuvarlama hatalarını önlemek için `float`
+  değil `Decimal` ile işlenir. Kur tam hassasiyette tutulur; sonuç 2 ondalığa
+  yuvarlanır (`ROUND_HALF_UP`).
 
-On failure, a non-2xx status and:
+### Hata — non-2xx
 
 ```json
-{ "error": "<short_machine_code>", "message": "<a sentence a person could read>" }
+{ "error": "<machine_code>", "message": "<insanın okuyabileceği bir cümle>" }
 ```
 
-List your error codes in your README.
+| HTTP | `error` | Ne zaman |
+|---|---|---|
+| 400 | `invalid_amount` | `amount` sıfır, negatif veya sonlu değil |
+| 400 | `same_currency` | `from` ve `to` aynı |
+| 400 | `unknown_currency` | para birimi kodu hatalı ya da ECB tarafından yayınlanmıyor |
+| 400 | `future_date` | `date` gelecekte — henüz kur yok |
+| 400 | `date_out_of_range` | `date` serinin başlangıcından önce (1999-01-04) |
+| 404 | `rate_unavailable` | geçerli girdi için upstream'de kur yok |
+| 422 | `invalid_request` | bir sorgu parametresi eksik ya da hatalı |
+| 502 | `upstream_unavailable` | upstream'e ulaşılamadı ya da hata döndü |
+| 502 | `upstream_invalid_response` | upstream JSON olmayan / bozuk gövde döndü |
+| 504 | `upstream_unavailable` | upstream zamanında cevap vermedi |
 
-### The part that matters
+## Zorunlu durumlarda davranış
 
-The caller is a language model talking to a paying customer, so **a wrong number
-is worse than no number.** Decide — and implement — what happens when:
+| Durum | Davranış |
+|---|---|
+| Sorulan tarihte kur yok (hafta sonu/tatil) | En son yayınlanan kuru döner; `rate_date` gerçek günü gösterir. |
+| Tarih gelecekte | `400 future_date` — upstream'e gitmeden doğrulanır. |
+| Tarih seri başlangıcından önce | `400 date_out_of_range`. |
+| Para birimi yok | `400 unknown_currency` (upstream para birimi listesine karşı doğrulanır). |
+| `from == to` | `400 same_currency`. |
+| Upstream yavaş / 500 / JSON değil | `504` / `502 upstream_unavailable` / `502 upstream_invalid_response` — asla uydurma sayı. |
+| `amount` eksik / sıfır / negatif | `422 invalid_request` / `400 invalid_amount`. Yüksek hassasiyetli tutarlar kabul edilir; sonuç 2 ondalığa yuvarlanır. |
 
-- the ECB published no rate for the date asked (weekends, holidays);
-- the date is in the future, or before the series starts;
-- the currency code does not exist, or `from` and `to` are the same;
-- the upstream is slow, returns 500, or returns something that is not JSON;
-- `amount` is missing, zero, negative, or has ten decimal places.
+## Önbellek (cache)
 
-Your endpoint must never invent a rate, and must never present a rate as
-belonging to a date it does not belong to. Note that the upstream itself tells
-you which date its rates are from — read it. If you choose to answer with an
-earlier published rate, the response has to make that visible, because the model
-has to be able to tell the customer which day the number is from.
+Aynı istekler süreç içi bir önbellekten karşılanır; upstream'e tekrar sorulmaz.
+Sabit bir geçmiş tarihe ait kur süresiz cache'lenir (hiç değişmez); "latest" kuru
+kısa bir TTL ile cache'lenir. Yayınlanan para birimi listesi de cache'lenir.
 
-### Also required
+## Tasarım notları
 
-- **Tests that pass with no network at all** — fake the upstream. We run
-  `./test.sh` with `FX_UPSTREAM_BASE` pointing at a closed port.
-- A README of your own we can follow in under a minute: how to run it, how to
-  run the tests, your error codes, and what your endpoint does in each of the
-  cases above.
-- A repeat of the same question should not re-ask the upstream.
-- `NOTES.md`, one page. The skeleton is in this repo.
+Bkz. [`NOTES.md`](./NOTES.md). Part B kod incelemesi [`REVIEW.md`](./REVIEW.md)
+içinde.
 
-### Not required, not scored
+## Dizin yapısı
 
-Auth, a database, a UI, a Dockerfile, CI, deployment, more endpoints. Adding them
-will not help you; a smaller thing done carefully will.
-
----
-
-## Part B — review (about 45 minutes)
-
-`tool.py` in this repository is a working version of the same service, written
-quickly with an AI assistant. It runs. **Review it as if it were going live
-tomorrow for a customer who pays us.**
-
-Fill in `REVIEW.md`, one page:
-
-- what is wrong, and what it does to a **customer** — not to a linter;
-- how you would verify each finding;
-- your findings **ranked**, and which single one you would fix before shipping
-  tonight.
-
-Fewer findings, ranked and explained, beat a long list. If something looks
-suspicious but is actually fine, saying so is worth as much as finding a real
-defect.
-
----
-
-## Submitting
-
-Reply to our email with a link to your repository. Commit in small steps — the
-history is part of what we read. Five days is plenty; if you need more, just say
-so.
-
-Any question about this brief, ask. An unclear requirement is our fault, not a
-test.
-
----
-
-<sub>mangolab — Mango Yazılım Teknolojileri Ltd. Şti. · [mangolab.ai/careers](https://mangolab.ai/careers)</sub>
+```
+app/
+  config.py     ortam değişkenlerinden ayarlar
+  errors.py     hata kodları ve alan (domain) hata tipi
+  models.py     cevap modeli
+  cache.py      küçük TTL önbellek
+  upstream.py   Frankfurter istemcisi (timeout, durum kontrolü, gerçek tarihi okur)
+  service.py    doğrulama, fallback politikası, önbellek, hesaplama
+  main.py       FastAPI uygulaması, uç nokta, hata handler'ları
+tests/          sahte upstream ile ağsız testler
+```
